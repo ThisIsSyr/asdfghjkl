@@ -5,6 +5,11 @@ Streamlit 主应用：光伏板 EL 图像缺陷检测与智能运维辅助系统
 """
 from __future__ import annotations
 
+# 修复 PyTorch + OpenCV OpenMP 冲突（必须在其他 import 之前设置）
+import os as _os
+_os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -80,10 +85,25 @@ def page_home():
 def page_single():
     st.header("单张图像检测")
     status = get_model_status()
-    st.caption(
-        f"当前模型权重：{'已找到文件' if status['weight_exists'] else '未放置'} "
-        f"| 推理模式：`{status['using_real_model'] and 'PV-S3 真实推理' or 'Fallback 演示'}`"
+    weight_status = (
+        "✅ 已加载" if status["using_real_model"]
+        else ("⚠️ 权重文件存在但未加载" if status["weight_exists"] else "❌ 未放置权重")
     )
+    st.caption(
+        f"模型权重：{weight_status} | "
+        f"预训练ResNet：{'✅' if status.get('pretrained_exists') else '❌'} | "
+        f"推理模式：`{'PV-S3' if status['using_real_model'] else '未加载'}`"
+    )
+
+    # 置信度阈值滑块
+    st.markdown("**⚙️ 置信度阈值调节**")
+    st.caption("只统计模型置信度 ≥ 阈值的像素为缺陷。阈值越高，检测越严格。")
+    conf_threshold = st.select_slider(
+        "置信度阈值",
+        options=[0.85, 0.88, 0.90, 0.92, 0.95, 0.97, 0.98, 0.99, 0.995, 0.999],
+        value=0.90,
+    )
+    st.caption(f"当前阈值：**{conf_threshold}**")
 
     up = st.file_uploader("上传 EL 图像（jpg/jpeg/png）", type=["jpg", "jpeg", "png"])
     run_btn = st.button("开始检测", type="primary")
@@ -94,8 +114,8 @@ def page_single():
             return
         try:
             saved = save_uploaded_file(up)
-            with st.spinner("正在推理与生成可视化..."):
-                res = run_inference(saved)
+            with st.spinner(f"正在 PV-S3 推理（阈值={conf_threshold}）..."):
+                res = run_inference(saved, confidence_threshold=conf_threshold)
                 res["detect_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 st.session_state["last_single"] = res
                 st.session_state["last_single_path"] = str(saved)
@@ -109,31 +129,73 @@ def page_single():
         st.info("请上传图片并点击「开始检测」。")
         return
 
-    c1, c2, c3 = st.columns(3)
+    # 5 图展示：上排3张 + 下排2张，强制等大
+    st.markdown(
+        """
+        <style>
+        .stImage img {
+            max-height: 350px;
+            object-fit: contain;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     orig = resolve_project_path(res["original_path"], PROJECT_ROOT)
-    mask = resolve_project_path(res["mask_path"], PROJECT_ROOT)
+    colorized = resolve_project_path(res.get("colorized_mask_path", ""), PROJECT_ROOT)
+    heatmap = resolve_project_path(res.get("heatmap_path", ""), PROJECT_ROOT)
     over = resolve_project_path(res["overlay_path"], PROJECT_ROOT)
-    with c1:
+    mask = resolve_project_path(res["mask_path"], PROJECT_ROOT)
+
+    # 上排：原图 | 分类预测图 | 置信度热图
+    r1c1, r1c2, r1c3 = st.columns(3)
+    with r1c1:
         st.subheader("原图")
         if orig.is_file():
             st.image(Image.open(orig), use_container_width=True)
-    with c2:
-        st.subheader("缺陷 Mask")
-        if mask.is_file():
-            st.image(Image.open(mask), use_container_width=True)
-    with c3:
+    with r1c2:
+        st.subheader("分类预测图")
+        if colorized and colorized.is_file():
+            st.image(Image.open(colorized), use_container_width=True)
+    with r1c3:
+        st.subheader("置信度热图")
+        if heatmap and heatmap.is_file():
+            st.image(Image.open(heatmap), use_container_width=True)
+
+    # 下排：叠加图 | 二值Mask（用 offset columns 居中）
+    _, r2c1, r2c2, _ = st.columns([1, 3, 3, 1])
+    with r2c1:
         st.subheader("叠加图")
         if over.is_file():
             st.image(Image.open(over), use_container_width=True)
+    with r2c2:
+        st.subheader("二值 Mask")
+        if mask.is_file():
+            st.image(Image.open(mask), use_container_width=True)
 
+    # 缺陷总体指标
+    st.markdown("---")
+    st.subheader("缺陷量化统计")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("缺陷面积", f"{res['defect_area']} px")
     m2.metric("面积占比", f"{res['defect_area_ratio'] * 100:.2f}%")
     m3.metric("连通区域数", f"{res['connected_components']}")
     m4.metric("严重程度", res["severity_level"])
 
+    # 逐类面积
+    per_class = res.get("per_class_areas") or {}
+    if per_class:
+        st.subheader("各类缺陷像素面积")
+        cls_cols = st.columns(len(per_class))
+        for i, (cls_name, area) in enumerate(per_class.items()):
+            with cls_cols[i]:
+                st.metric(cls_name, f"{area} px")
+
+    st.markdown(f"**缺陷类别：** {res['defect_categories']}")
     st.markdown(f"**维护建议：** {res['suggestion']}")
-    st.markdown(f"**平均置信度：** {res['confidence_score']:.4f}")
+    st.markdown(f"**全局平均置信度：** {res['confidence_score']:.4f}")
+    st.markdown(f"**使用置信度阈值：** {res.get('confidence_threshold', 'N/A')}")
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -159,6 +221,9 @@ def page_single():
                     confidence_score=res["confidence_score"],
                     severity_level=res["severity_level"],
                     suggestion=res["suggestion"],
+                    colorized_mask_path=res.get("colorized_mask_path", ""),
+                    heatmap_path=res.get("heatmap_path", ""),
+                    per_class_stats=json.dumps(res.get("per_class_areas", {}), ensure_ascii=False),
                 )
                 st.session_state["last_saved_result_id"] = rid
                 st.success(f"已保存，result_id={rid}")
@@ -184,6 +249,15 @@ def page_single():
 
 def page_batch():
     st.header("批量图像检测")
+
+    # 置信度阈值
+    conf_threshold = st.select_slider(
+        "置信度阈值",
+        options=[0.85, 0.88, 0.90, 0.92, 0.95, 0.97, 0.98, 0.99, 0.995, 0.999],
+        value=0.90,
+    )
+    st.caption(f"当前阈值：**{conf_threshold}**")
+
     files = st.file_uploader(
         "一次选择多张图片",
         type=["jpg", "jpeg", "png"],
@@ -197,7 +271,7 @@ def page_batch():
                 continue
             try:
                 saved = save_uploaded_file(f, subfolder="batch")
-                res = run_inference(saved)
+                res = run_inference(saved, confidence_threshold=conf_threshold)
                 res["file_name"] = f.name
                 rows.append(res)
             except Exception as e:
@@ -225,6 +299,7 @@ def page_batch():
                 "最大缺陷面积": r["max_defect_area"],
                 "严重程度": r["severity_level"],
                 "模式": r.get("mode", ""),
+                "阈值": r.get("confidence_threshold", ""),
             }
         )
     df = pd.DataFrame(df_data)
@@ -282,6 +357,9 @@ def page_batch():
                     confidence_score=r["confidence_score"],
                     severity_level=r["severity_level"],
                     suggestion=r["suggestion"],
+                    colorized_mask_path=r.get("colorized_mask_path", ""),
+                    heatmap_path=r.get("heatmap_path", ""),
+                    per_class_stats=json.dumps(r.get("per_class_areas", {}), ensure_ascii=False),
                 )
             st.success("已写入数据库")
         except Exception as e:
@@ -295,8 +373,20 @@ def page_history():
     if not records:
         st.info("暂无记录")
         return
+
+    # 简化显示：只展示关键列
+    display_cols = [
+        "result_id", "image_name", "detect_time", "severity_level",
+        "defect_area", "defect_area_ratio", "connected_components",
+        "confidence_score", "model_version",
+    ]
     df = pd.DataFrame(records)
-    st.dataframe(df, use_container_width=True)
+    cols = [c for c in display_cols if c in df.columns]
+    st.dataframe(df[cols], use_container_width=True)
+
+    # 展开查看逐类详情
+    with st.expander("查看详细记录（含逐类面积）"):
+        st.dataframe(df, use_container_width=True)
 
     del_id = st.number_input("输入要删除的 result_id", min_value=1, step=1)
     if st.button("删除该记录"):

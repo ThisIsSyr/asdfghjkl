@@ -46,6 +46,8 @@ def init_db() -> None:
                 detect_time TEXT NOT NULL,
                 mask_path TEXT,
                 overlay_path TEXT,
+                colorized_mask_path TEXT,
+                heatmap_path TEXT,
                 defect_area INTEGER,
                 defect_area_ratio REAL,
                 connected_components INTEGER,
@@ -53,10 +55,23 @@ def init_db() -> None:
                 confidence_score REAL,
                 severity_level TEXT,
                 suggestion TEXT,
+                per_class_stats TEXT,
                 FOREIGN KEY (image_id) REFERENCES image_info(image_id)
             )
             """
         )
+        # 兼容旧表：渐进式增加新列
+        for col, col_type in [
+            ("colorized_mask_path", "TEXT"),
+            ("heatmap_path", "TEXT"),
+            ("per_class_stats", "TEXT"),
+        ]:
+            try:
+                cur.execute(
+                    f"ALTER TABLE detection_result ADD COLUMN {col} {col_type}"
+                )
+            except Exception:
+                pass  # 列已存在则忽略
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS report_info (
@@ -107,6 +122,9 @@ def insert_detection_result(
     severity_level: str,
     suggestion: str,
     detect_time: str | None = None,
+    colorized_mask_path: str | None = None,
+    heatmap_path: str | None = None,
+    per_class_stats: str | None = None,
 ) -> int:
     if detect_time is None:
         detect_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -116,10 +134,11 @@ def insert_detection_result(
             """
             INSERT INTO detection_result (
                 image_id, model_name, model_version, detect_time,
-                mask_path, overlay_path, defect_area, defect_area_ratio,
+                mask_path, overlay_path, colorized_mask_path, heatmap_path,
+                defect_area, defect_area_ratio,
                 connected_components, max_defect_area, confidence_score,
-                severity_level, suggestion
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                severity_level, suggestion, per_class_stats
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 image_id,
@@ -128,6 +147,8 @@ def insert_detection_result(
                 detect_time,
                 mask_path,
                 overlay_path,
+                colorized_mask_path,
+                heatmap_path,
                 defect_area,
                 defect_area_ratio,
                 connected_components,
@@ -135,6 +156,7 @@ def insert_detection_result(
                 confidence_score,
                 severity_level,
                 suggestion,
+                per_class_stats,
             ),
         )
         conn.commit()
@@ -169,6 +191,8 @@ def get_all_records(severity_filter: str | None = None) -> list[dict[str, Any]]:
             dr.detect_time,
             dr.mask_path,
             dr.overlay_path,
+            dr.colorized_mask_path,
+            dr.heatmap_path,
             dr.defect_area,
             dr.defect_area_ratio,
             dr.connected_components,
@@ -178,6 +202,7 @@ def get_all_records(severity_filter: str | None = None) -> list[dict[str, Any]]:
             dr.suggestion,
             dr.model_name,
             dr.model_version,
+            dr.per_class_stats,
             ri.report_path,
             ri.generate_time AS report_generate_time
         FROM detection_result dr

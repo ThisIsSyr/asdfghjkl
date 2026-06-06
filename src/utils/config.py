@@ -13,6 +13,8 @@ UPLOAD_DIR = PROJECT_ROOT / "uploads"
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 MASK_DIR = OUTPUT_DIR / "masks"
 OVERLAY_DIR = OUTPUT_DIR / "overlays"
+HEATMAP_DIR = OUTPUT_DIR / "heatmaps"
+COLORIZED_DIR = OUTPUT_DIR / "colorized"
 CSV_DIR = OUTPUT_DIR / "csv"
 REPORTS_DIR = PROJECT_ROOT / "reports"
 DATA_DIR = PROJECT_ROOT / "data"
@@ -21,21 +23,25 @@ SAMPLE_IMAGES_DIR = PROJECT_ROOT / "sample_images"
 
 DB_PATH = DATA_DIR / "detection.db"
 
-# PV-S3 / 兼容模型权重（放入该路径即可自动尝试真实推理）
+# PV-S3 模型权重
 MODEL_WEIGHT_PATH = PROJECT_ROOT / "weights" / "pv_s3_best.pth"
 MODEL_CONFIG_PATH = PROJECT_ROOT / "weights" / "config.yaml"
+PRETRAINED_RESNET_DIR = PROJECT_ROOT / "weights" / "pretrained"
 
-# 推理元信息（接入真实模型时可改为实际版本）
+# 推理元信息
 MODEL_NAME = "PV-S3"
-MODEL_VERSION = "fallback-demo"
+MODEL_VERSION = "2614-e30"
+
+# 默认置信度阈值（缺陷判定：argmax ≠ 0 且 max_prob ≥ 此值）
+DEFAULT_CONFIDENCE_THRESHOLD = 0.90
+
+# fallback 平均置信度
+FALLBACK_MEAN_CONFIDENCE = 0.72
 
 # 严重程度阈值（缺陷面积占比）
 SEVERITY_NORMAL_MAX = 0.01
 SEVERITY_LIGHT_MAX = 0.03
 SEVERITY_MEDIUM_MAX = 0.08
-
-# fallback 平均置信度（演示用）
-FALLBACK_MEAN_CONFIDENCE = 0.72
 
 # 允许的图片扩展名
 ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
@@ -47,6 +53,8 @@ def ensure_directories() -> None:
         UPLOAD_DIR,
         MASK_DIR,
         OVERLAY_DIR,
+        HEATMAP_DIR,
+        COLORIZED_DIR,
         CSV_DIR,
         REPORTS_DIR,
         DATA_DIR,
