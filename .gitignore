@@ -1,0 +1,30 @@
+# 权重文件（太大，不提交）
+weights/*.pth
+weights/pretrained/
+
+# 运行时输出（每次推理生成，不提交）
+outputs/
+reports/
+uploads/
+
+# 数据库
+data/*.db
+
+# 密钥（切勿提交）
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+.claude/
