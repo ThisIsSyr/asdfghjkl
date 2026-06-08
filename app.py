@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Streamlit 主应用：光伏板 EL 图像缺陷检测与智能运维辅助系统。
 运行：在项目根目录执行  streamlit run app.py
@@ -123,6 +123,14 @@ def render_llm_sidebar() -> dict:
     st.sidebar.text_input("API Base URL", key="llm_base_url")
     st.sidebar.text_input("模型名称", key="llm_model")
 
+    if "llm_use_rag" not in st.session_state:
+        st.session_state.llm_use_rag = False
+    st.sidebar.checkbox(
+        "📚 启用光伏领域知识检索 (RAG)",
+        key="llm_use_rag",
+        help="勾选后 Agent 生成报告时将自动检索知识库",
+    )
+
     api_key = st.session_state.llm_api_key
     base_url = st.session_state.llm_base_url
     model_name = st.session_state.llm_model
@@ -135,6 +143,7 @@ def render_llm_sidebar() -> dict:
         "base_url": base_url,
         "model_name": model_name,
         "configured": configured,
+        "use_rag": st.session_state.llm_use_rag,
     }
 
 
@@ -350,6 +359,7 @@ def page_single():
                             api_key=llm_cfg.get("api_key"),
                             base_url=llm_cfg.get("base_url"),
                             model_name=llm_cfg.get("model_name"),
+                            use_rag=llm_cfg.get("use_rag", False),
                         )
                     if out.get("success"):
                         path = out["report_path"]
@@ -363,6 +373,12 @@ def page_single():
                             st.write(out.get("agent_output", ""))
                             if out.get("agent_notes"):
                                 st.caption(" | ".join(out["agent_notes"]))
+                        rag_sources = out.get("rag_sources")
+                        if rag_sources:
+                            with st.expander("📚 RAG 知识库检索来源", expanded=False):
+                                for i, src in enumerate(rag_sources, 1):
+                                    st.markdown(f"**{i}. [{src['score']:.4f}] {src['source']}**")
+                                    st.caption(src['content'][:300])
                     else:
                         st.error(out.get("error", "Agent 生成失败"))
                 except Exception as e:
@@ -547,6 +563,9 @@ def page_ai_agent():
     if not res:
         st.warning("请先在「单张图像检测」完成一次检测，再在此生成 Agent 报告。")
         return
+    use_rag = llm_cfg.get("use_rag", False)
+    if use_rag:
+        st.info("📚 RAG 知识增强已启用 — Agent 将检索光伏领域知识库辅助分析")
     if st.button("使用 Agent 生成报告", type="primary"):
         if not llm_cfg.get("configured"):
             st.error("请先在侧边栏配置 LLM API Key。")
@@ -559,13 +578,110 @@ def page_ai_agent():
                 api_key=llm_cfg.get("api_key"),
                 base_url=llm_cfg.get("base_url"),
                 model_name=llm_cfg.get("model_name"),
+                use_rag=llm_cfg.get("use_rag", False),
             )
         if out.get("success"):
             st.success(f"报告路径：{out['report_path']}")
             st.markdown("**Agent 最终输出：**")
             st.write(out.get("agent_output", ""))
+            if out.get("agent_notes"):
+                st.caption(" | ".join(out["agent_notes"]))
+            rag_sources = out.get("rag_sources")
+            if rag_sources:
+                with st.expander("📚 RAG 知识库检索来源", expanded=False):
+                    for i, src in enumerate(rag_sources, 1):
+                        st.markdown(f"**{i}. [{src['score']:.4f}] {src['source']}**")
+                        st.caption(src['content'][:300])
         else:
             st.error(out.get("error"))
+
+
+def page_rag():
+    """RAG 知识库管理页面。"""
+    st.header("📚 RAG 知识库管理")
+    st.markdown("""
+光伏缺陷检测领域知识库，为 AI Agent 提供专业参考资料。
+知识库文档位于 `data/knowledge/`，向量库位于 `data/chroma_db/`。
+    """)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("知识库状态")
+        kb_dir = Path("data/knowledge")
+        md_files = list(kb_dir.glob("*.md")) if kb_dir.exists() else []
+        pdf_files = list(kb_dir.glob("*.pdf")) if kb_dir.exists() else []
+        st.metric("知识文档数", len(md_files) + len(pdf_files))
+        if md_files or pdf_files:
+            with st.expander("查看文档列表"):
+                for f in md_files:
+                    st.caption(f"📄 {f.name}")
+                for f in pdf_files:
+                    st.caption(f"📑 {f.name}")
+
+        chroma_dir = Path("data/chroma_db")
+        chroma_exists = chroma_dir.exists() and any(chroma_dir.iterdir())
+        chroma_count = 0
+        if chroma_exists:
+            try:
+                import sqlite3
+                conn = sqlite3.connect(str(chroma_dir / "chroma.sqlite3"))
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM embeddings")
+                chroma_count = cur.fetchone()[0]
+                conn.close()
+            except Exception:
+                pass
+        chroma_real = chroma_exists and chroma_count > 0
+        status_text = f"✅ 已构建 ({chroma_count} 条)" if chroma_real else ("⚠️ 空库，需构建" if chroma_exists else "❌ 未构建")
+        st.metric("向量库状态", status_text)
+
+    with col2:
+        st.subheader("构建/重建知识库")
+        st.caption("运行知识库灌入脚本，将 Markdown 文档向量化存入 ChromaDB。")
+        llm_cfg = st.session_state.get("llm_sidebar", {})
+
+        if st.button("🔨 构建知识库", type="primary"):
+            if not llm_cfg.get("configured"):
+                st.error("请先在侧边栏配置 LLM API Key（用于生成 Embedding）。")
+            else:
+                with st.spinner("正在分块、向量化文档……"):
+                    try:
+                        import subprocess
+                        script = Path("scripts/build_knowledge_base.py")
+                        cmd = [
+                            sys.executable, str(script), "--force",
+                            "--api-key", llm_cfg.get("api_key", ""),
+                            "--base-url", llm_cfg.get("base_url", ""),
+                        ]
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                        if result.returncode == 0:
+                            st.success("知识库构建完成！")
+                            st.code(result.stdout)
+                        else:
+                            st.error(f"构建失败")
+                            st.code(result.stderr or result.stdout)
+                    except Exception as e:
+                        st.error(f"构建出错: {e}")
+
+        if st.button("🔍 检查知识库"):
+            try:
+                import subprocess
+                script = Path("scripts/build_knowledge_base.py")
+                cmd = [sys.executable, str(script), "--check"]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                st.code(result.stdout)
+            except Exception as e:
+                st.error(f"检查失败: {e}")
+
+    st.markdown("---")
+    st.subheader("使用说明")
+    st.markdown("""
+1. 在侧边栏配置 LLM API Key
+2. 点击「构建知识库」完成文档向量化
+3. 在侧边栏勾选「启用光伏领域知识检索」
+4. 运行 Agent 生成报告时，将自动检索相关知识
+    """)
 
 
 def page_docs():
@@ -634,6 +750,7 @@ def main():
         "AI 智能报告": page_ai_agent,
         "模型与技术说明": page_docs,
         "模型指标评价": page_metrics,
+        "RAG 知识库": page_rag,
     }
     st.sidebar.title("导航")
     page_names = list(pages.keys())

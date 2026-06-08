@@ -1,5 +1,6 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """报告生成 Agent 工具集。"""
+
 from __future__ import annotations
 
 import json
@@ -19,6 +20,27 @@ class ReportAgentContext:
     result_dict: dict[str, Any]
     report_path: str | None = None
     agent_notes: list[str] = field(default_factory=list)
+    # RAG 配置
+    use_rag: bool = False
+    rag_api_key: str | None = None
+    rag_base_url: str | None = None
+    rag_sources: list[dict] = field(default_factory=list)  # RAG 检索结果，供 UI 展示
+
+
+# 延迟导入，避免未安装 chromadb 时启动失败
+_rag_retriever = None
+
+
+def _get_rag_retriever(ctx: ReportAgentContext):
+    global _rag_retriever
+    if _rag_retriever is None:
+        from src.rag.retriever import RAGRetriever
+
+        _rag_retriever = RAGRetriever(
+            api_key=ctx.rag_api_key,
+            base_url=ctx.rag_base_url,
+        )
+    return _rag_retriever
 
 
 def _format_summary(result: dict[str, Any]) -> str:
@@ -66,7 +88,7 @@ def build_report_tools(ctx: ReportAgentContext) -> list:
 
     @tool
     def generate_base_word_report() -> str:
-        """生成包含原图、Mask、热图、统计表的基础 Word 检测报告，返回报告文件路径。"""
+        """生成包含原图、Mask、热图、统计表的基��� Word 检测报告，返回报告文件路径。"""
         path = generate_report(ctx.result_dict)
         ctx.report_path = path
         ctx.agent_notes.append(f"基础报告已生成: {path}")
@@ -106,9 +128,32 @@ def build_report_tools(ctx: ReportAgentContext) -> list:
             return ctx.report_path
         return "尚未生成报告，请先调用 generate_base_word_report。"
 
-    return [
+    tools = [
         get_detection_summary,
         generate_base_word_report,
         append_ai_analysis,
         get_report_file_path,
     ]
+
+    # RAG 检索工具（仅在启用 RAG 时注册）
+    if ctx.use_rag:
+
+        @tool
+        def search_defect_knowledge(query: str) -> str:
+            """检索光伏缺陷检测领域知识库，获取缺陷成因、评级规范、运维指南等专业参考资料。
+            在撰写执行摘要、缺陷分析、运维建议、风险评估和结论前，应先调用此工具获取领域知识。
+            检索结果必须在报告的「参考资料」部分明确标注来源。"""
+            try:
+                retriever = _get_rag_retriever(ctx)
+                formatted = retriever.search_formatted(query)
+                raw_hits = retriever.search(query)
+                ctx.rag_sources.extend(raw_hits)
+                ctx.agent_notes.append(f"RAG 检索: '{query[:40]}...' -> {len(raw_hits)} 条结果")
+                return formatted + "\n\n请在你的报告中引用上述知识库内容，并在「参考资料」章节列出使用的知识来源。"
+            except Exception as e:
+                ctx.agent_notes.append(f"RAG 检索失败: {e}")
+                return f"RAG 检索失败: {e}。请基于已有检测数据继续分析。"
+
+        tools.append(search_defect_knowledge)
+
+    return tools

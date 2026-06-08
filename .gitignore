@@ -1,16 +1,16 @@
-# 权重文件（太大，不提交）
+﻿# 鏉冮噸鏂囦欢锛堝お澶э紝涓嶆彁浜わ級
 weights/*.pth
 weights/pretrained/
 
-# 运行时输出（每次推理生成，不提交）
+# 杩愯鏃惰緭鍑猴紙姣忔鎺ㄧ悊鐢熸垚锛屼笉鎻愪氦锛?
 outputs/
 reports/
 uploads/
 
-# 数据库
+# 鏁版嵁搴?
 data/*.db
 
-# 密钥（切勿提交）
+# 瀵嗛挜锛堝垏鍕挎彁浜わ級
 .env
 
 # Python
@@ -28,3 +28,8 @@ env/
 .DS_Store
 Thumbs.db
 .claude/
+
+# RAG generated files
+data/chroma_db/
+data/knowledge/*.pdf
+*.pkl
