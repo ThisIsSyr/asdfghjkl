@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Streamlit 主应用：光伏板 EL 图像缺陷检测与智能运维辅助系统。
 运行：在项目根目录执行  streamlit run app.py
@@ -175,6 +175,7 @@ def page_home():
     )
 
 
+
 def page_single():
     st.header("单张图像检测")
     _show_torch_warning_if_needed()
@@ -199,32 +200,106 @@ def page_single():
     )
     st.caption(f"当前阈值：**{conf_threshold}**")
 
-    up = st.file_uploader("上传 EL 图像（jpg/jpeg/png）", type=["jpg", "jpeg", "png"])
-    run_btn = st.button("开始检测", type="primary")
+    # 标签页：本地上传 / 摄像头截图
+    tab1, tab2 = st.tabs(["📁 本地上传", "📷 摄像头截图"])
 
-    if run_btn and up is not None:
-        if not validate_image_filename(up.name):
-            st.error("仅支持 jpg、jpeg、png")
-            return
-        ts = st.session_state.get("torch_status") or {}
-        if not ts.get("any_ok"):
-            st.error("PyTorch 环境异常，无法推理。请按上方修复指南重建环境后重试。")
-            return
-        try:
-            saved = save_uploaded_file(up)
-            with st.spinner(f"正在 PV-S3 推理（阈值={conf_threshold}）..."):
-                res = run_inference(saved, confidence_threshold=conf_threshold)
-                res["detect_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                st.session_state["last_single"] = res
-                st.session_state["last_single_path"] = str(saved)
-            st.success("检测完成")
-        except Exception as e:
-            st.error(f"检测失败：{e}")
-            return
+    # ========== 标签页1：本地上传 ==========
+    with tab1:
+        st.subheader("上传 EL 图像")
+        st.caption("支持 jpg、jpeg、png 格式")
+        
+        uploaded_file = st.file_uploader("选择图片文件", type=["jpg", "jpeg", "png"], key="upload_tab_uploader")
+        detect_btn = st.button("开始检测", type="primary", key="upload_detect_btn")
 
+        if detect_btn and uploaded_file is not None:
+            if not validate_image_filename(uploaded_file.name):
+                st.error("仅支持 jpg、jpeg、png 格式")
+                return
+            ts = st.session_state.get("torch_status") or {}
+            if not ts.get("any_ok"):
+                st.error("PyTorch 环境异常，无法推理。请按上方修复指南重建环境后重试。")
+                return
+            try:
+                saved = save_uploaded_file(uploaded_file)
+                with st.spinner(f"正在 PV-S3 推理（阈值={conf_threshold}）..."):
+                    res = run_inference(saved, confidence_threshold=conf_threshold)
+                    res["detect_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    res["source_type"] = "upload"
+                    st.session_state["last_single"] = res
+                    st.session_state["last_single_path"] = str(saved)
+                st.success("检测完成")
+            except Exception as e:
+                st.error(f"检测失败：{e}")
+                return
+
+    # ========== 标签页2：摄像头截图 ==========
+    with tab2:
+        st.subheader("摄像头实时预览")
+        st.caption("点击相机图标拍照，或使用底部按钮")
+        
+        # 使用 Streamlit 内置的 camera_input 组件
+        camera_image = st.camera_input("拍照", key="camera_input_main")
+        
+        if camera_image is not None:
+            # 截图成功，显示预览
+            st.success("📸 截图成功！")
+            
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                st.subheader("截图预览")
+                st.image(camera_image, use_container_width=True)
+            
+            with col2:
+                st.subheader("操作")
+                retake_btn = st.button("🔄 重新拍摄", key="camera_retake_btn")
+                detect_camera_btn = st.button("✅ 确认并开始检测", type="primary", key="camera_detect_btn")
+                
+                if retake_btn:
+                    # 清除当前截图，让用户重新拍摄
+                    st.session_state["last_camera_image"] = None
+                    if hasattr(st, "rerun"):
+                        st.rerun()
+                    else:
+                        st.experimental_rerun()
+                
+                if detect_camera_btn:
+                    ts = st.session_state.get("torch_status") or {}
+                    if not ts.get("any_ok"):
+                        st.error("PyTorch 环境异常，无法推理。请按上方修复指南重建环境后重试。")
+                        return
+                    try:
+                        # 生成带时间戳的文件名
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"camera_capture_{timestamp}.png"
+                        
+                        # 保存到 uploads 目录
+                        uploads_dir = PROJECT_ROOT / "uploads"
+                        uploads_dir.mkdir(parents=True, exist_ok=True)
+                        saved_path = uploads_dir / filename
+                        
+                        # 将截图保存到文件
+                        with open(saved_path, "wb") as f:
+                            f.write(camera_image.getvalue())
+                        
+                        with st.spinner(f"正在 PV-S3 推理（阈值={conf_threshold}）..."):
+                            res = run_inference(saved_path, confidence_threshold=conf_threshold)
+                            res["detect_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            res["source_type"] = "camera"
+                            st.session_state["last_single"] = res
+                            st.session_state["last_single_path"] = str(saved_path)
+                        st.success(f"检测完成！截图已保存为：{filename}")
+                    except Exception as e:
+                        st.error(f"检测失败：{e}")
+                        return
+        else:
+            # 摄像头未启动或用户未授权
+            st.info("👆 点击上方相机图标启动摄像头，或使用「拍照」按钮")
+            st.caption("💡 如果浏览器提示需要摄像头权限，请选择「允许」。如果无法启动摄像头，请切换到「本地上传」标签页。")
+
+    # ========== 检测结果展示（两个标签页共享） ==========
     res = st.session_state.get("last_single")
     if not res:
-        st.info("请上传图片并点击「开始检测」。")
+        st.info("请上传图片或使用摄像头截图，然后点击「开始检测」。")
         return
 
     # 5 图展示：上排3张 + 下排2张，强制等大
@@ -346,6 +421,10 @@ def page_single():
 
     with col_c:
         llm_cfg = st.session_state.get("llm_sidebar", {})
+        if llm_cfg.get("use_rag"):
+            st.success("📚 RAG 已启用 — 将检索知识库辅助分析", icon="📚")
+        else:
+            st.caption("💡 勾选侧边栏 RAG 开关可启用知识库增强")
         if st.button("🤖 Agent 生成智能报告", type="secondary"):
             if not llm_cfg.get("configured"):
                 st.error("请先在侧边栏配置 LLM API Key，或复制 .env.example 为 .env 后填写。")
@@ -375,7 +454,7 @@ def page_single():
                                 st.caption(" | ".join(out["agent_notes"]))
                         rag_sources = out.get("rag_sources")
                         if rag_sources:
-                            with st.expander("📚 RAG 知识库检索来源", expanded=False):
+                            with st.expander("📚 RAG 知识库检索来源", expanded=True):
                                 for i, src in enumerate(rag_sources, 1):
                                     st.markdown(f"**{i}. [{src['score']:.4f}] {src['source']}**")
                                     st.caption(src['content'][:300])
@@ -383,7 +462,6 @@ def page_single():
                         st.error(out.get("error", "Agent 生成失败"))
                 except Exception as e:
                     st.error(f"Agent 报告生成失败：{e}")
-
 
 def page_batch():
     st.header("批量图像检测")
@@ -565,7 +643,9 @@ def page_ai_agent():
         return
     use_rag = llm_cfg.get("use_rag", False)
     if use_rag:
-        st.info("📚 RAG 知识增强已启用 — Agent 将检索光伏领域知识库辅助分析")
+        st.success("📚 RAG 已启用 — Agent 将检索知识库辅助分析", icon="📚")
+    else:
+        st.caption("💡 勾选侧边栏 RAG 开关可启用知识库增强")
     if st.button("使用 Agent 生成报告", type="primary"):
         if not llm_cfg.get("configured"):
             st.error("请先在侧边栏配置 LLM API Key。")
@@ -588,7 +668,7 @@ def page_ai_agent():
                 st.caption(" | ".join(out["agent_notes"]))
             rag_sources = out.get("rag_sources")
             if rag_sources:
-                with st.expander("📚 RAG 知识库检索来源", expanded=False):
+                with st.expander("📚 RAG 知识库检索来源", expanded=True):
                     for i, src in enumerate(rag_sources, 1):
                         st.markdown(f"**{i}. [{src['score']:.4f}] {src['source']}**")
                         st.caption(src['content'][:300])
@@ -761,3 +841,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
