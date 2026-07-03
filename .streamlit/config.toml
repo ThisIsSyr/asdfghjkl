@@ -1,0 +1,6 @@
+[server]
+# 避免 Streamlit 扫描 langchain/transformers 海量子模块导致卡顿、无法翻页
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false

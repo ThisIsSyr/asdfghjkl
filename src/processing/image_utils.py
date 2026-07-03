@@ -5,9 +5,41 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import cv2
+import numpy as np
 from PIL import Image
 
 from src.utils.config import ALLOWED_IMAGE_EXTS, UPLOAD_DIR, ensure_directories
+
+
+def imread_bgr(path: str | Path) -> np.ndarray | None:
+    """
+    读取 BGR 图像，兼容 Windows 中文/Unicode 路径。
+    OpenCV 的 cv2.imread 无法直接读取含非 ASCII 字符的路径。
+    """
+    p = Path(path)
+    if not p.is_file():
+        return None
+    try:
+        data = np.fromfile(str(p), dtype=np.uint8)
+        if data.size == 0:
+            return None
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        return img
+    except OSError:
+        return None
+
+
+def imwrite_bgr(path: str | Path, image_bgr: np.ndarray) -> bool:
+    """写入 BGR 图像，兼容 Windows Unicode 路径。"""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    ext = p.suffix.lower() or ".png"
+    ok, buf = cv2.imencode(ext, image_bgr)
+    if not ok:
+        return False
+    buf.tofile(str(p))
+    return True
 
 
 def validate_image_filename(name: str) -> bool:

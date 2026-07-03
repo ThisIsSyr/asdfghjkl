@@ -69,6 +69,16 @@ pip install -r requirements-optional.txt
 
 也可参考 [PyTorch 官网](https://pytorch.org/) 选择与本机 CUDA 匹配的轮子。
 
+## AI Agent 智能报告（LangChain）
+
+1. 复制配置模板：`copy .env.example .env`（Windows）  
+2. 在 `.env` 中填入 `LLM_API_KEY`（默认对接 DeepSeek OpenAI 兼容接口）  
+3. 安装 Agent 依赖：`pip install langchain langchain-openai langchain-core python-dotenv`  
+4. 在 Streamlit 侧边栏可临时覆盖 API Key / Base URL / 模型名  
+5. 单张检测完成后点击 **「🤖 Agent 生成智能报告」**，或在 **「AI 智能报告」** 页生成  
+
+详见 `docs/tech_stack_summary.md`。
+
 ## 运行方法
 
 ```bash

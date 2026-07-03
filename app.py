@@ -8,6 +8,20 @@ from __future__ import annotations
 # 修复 PyTorch + OpenCV OpenMP 冲突（必须在其他 import 之前设置）
 import os as _os
 _os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+_os.environ.setdefault("OMP_NUM_THREADS", "1")
+_os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+# 尽早加载 PyTorch，降低与 OpenCV/Matplotlib 的 DLL 冲突概率
+_TORCH_PRELOAD_OK = False
+_TORCH_PRELOAD_ERROR = ""
+try:
+    import torch as _torch  # noqa: F401
+
+    _TORCH_PRELOAD_OK = True
+except OSError as _e:
+    _TORCH_PRELOAD_ERROR = str(_e)
+except Exception as _e:
+    _TORCH_PRELOAD_ERROR = str(_e)
 
 import json
 import sys
@@ -40,8 +54,17 @@ from src.database.db import (
 from src.evaluation.metrics import evaluate_masks
 from src.model.pv_s3_infer import get_model_status, run_inference
 from src.processing.image_utils import get_image_size, save_uploaded_file, validate_image_filename
+from src.llm.llm_config import DEFAULT_BASE_URL, DEFAULT_MODEL, get_llm_config, is_llm_configured, mask_api_key
 from src.report.report_generator import generate_report
 from src.utils.config import CSV_DIR, PROJECT_ROOT, ensure_directories
+from src.utils.torch_check import FIX_GUIDE, get_torch_status
+
+
+def _run_report_agent_safe(*args, **kwargs):
+    """仅在点击 Agent 报告时加载 LangChain，避免拖慢整站导航。"""
+    from src.llm.report_agent import run_report_agent_safe
+
+    return run_report_agent_safe(*args, **kwargs)
 
 # 页面配置
 st.set_page_config(
@@ -53,6 +76,75 @@ st.set_page_config(
 
 ensure_directories()
 init_db()
+
+if "torch_status" not in st.session_state:
+    st.session_state.torch_status = get_torch_status()
+
+
+def _show_torch_warning_if_needed() -> None:
+    ts = st.session_state.get("torch_status") or {}
+    if ts.get("any_ok"):
+        return
+    st.error("⚠️ **PyTorch 无法加载，模型推理不可用**")
+    err = ts.get("in_process_error") or ts.get("subprocess_error") or _TORCH_PRELOAD_ERROR
+    if err:
+        st.code(err[:800])
+    st.markdown(FIX_GUIDE)
+    if st.button("重新检测 PyTorch 环境", key="recheck_torch"):
+        st.session_state.torch_status = get_torch_status()
+        if hasattr(st, "rerun"):
+            st.rerun()
+        else:
+            st.experimental_rerun()
+
+
+def render_llm_sidebar() -> dict:
+    """侧边栏 LLM 配置（会话级，可覆盖 .env）。"""
+    env_cfg = get_llm_config()
+    if "llm_api_key" not in st.session_state:
+        st.session_state.llm_api_key = env_cfg.api_key or ""
+    if "llm_base_url" not in st.session_state:
+        st.session_state.llm_base_url = env_cfg.base_url
+    if "llm_model" not in st.session_state:
+        st.session_state.llm_model = env_cfg.model_name
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🤖 AI Agent 配置")
+    st.sidebar.caption(
+        f"默认 API：`{DEFAULT_BASE_URL}` | 模型：`{DEFAULT_MODEL}`\n\n"
+        "在 `.env` 中配置 `LLM_API_KEY` 可永久生效；也可在此临时填写。"
+    )
+    st.sidebar.text_input(
+        "LLM API Key",
+        type="password",
+        key="llm_api_key",
+        help="DeepSeek / OpenAI / 通义等 OpenAI 兼容接口",
+    )
+    st.sidebar.text_input("API Base URL", key="llm_base_url")
+    st.sidebar.text_input("模型名称", key="llm_model")
+
+    if "llm_use_rag" not in st.session_state:
+        st.session_state.llm_use_rag = False
+    st.sidebar.checkbox(
+        "📚 启用光伏领域知识检索 (RAG)",
+        key="llm_use_rag",
+        help="勾选后 Agent 生成报告时将自动检索知识库",
+    )
+
+    api_key = st.session_state.llm_api_key
+    base_url = st.session_state.llm_base_url
+    model_name = st.session_state.llm_model
+    configured = is_llm_configured(api_key)
+    st.sidebar.caption(
+        f"状态：{'✅ 已配置 ' + mask_api_key(api_key) if configured else '❌ 未配置 API Key'}"
+    )
+    return {
+        "api_key": api_key,
+        "base_url": base_url,
+        "model_name": model_name,
+        "configured": configured,
+        "use_rag": st.session_state.llm_use_rag,
+    }
 
 
 def page_home():
@@ -68,6 +160,7 @@ def page_home():
 - 生成 **Mask**、**叠加图**，并进行面积与连通域统计  
 - **严重程度**评估与**运维建议**  
 - **SQLite** 历史记录与 **Word** 检测报告  
+- **LangChain Agent** 智能撰写报告分析章节（可选，需 API Key）  
 - **像素级指标评价**（上传预测与真值 Mask）  
 
 ### 技术路线
@@ -82,8 +175,10 @@ def page_home():
     )
 
 
+
 def page_single():
     st.header("单张图像检测")
+    _show_torch_warning_if_needed()
     status = get_model_status()
     weight_status = (
         "✅ 已加载" if status["using_real_model"]
@@ -105,28 +200,106 @@ def page_single():
     )
     st.caption(f"当前阈值：**{conf_threshold}**")
 
-    up = st.file_uploader("上传 EL 图像（jpg/jpeg/png）", type=["jpg", "jpeg", "png"])
-    run_btn = st.button("开始检测", type="primary")
+    # 标签页：本地上传 / 摄像头截图
+    tab1, tab2 = st.tabs(["📁 本地上传", "📷 摄像头截图"])
 
-    if run_btn and up is not None:
-        if not validate_image_filename(up.name):
-            st.error("仅支持 jpg、jpeg、png")
-            return
-        try:
-            saved = save_uploaded_file(up)
-            with st.spinner(f"正在 PV-S3 推理（阈值={conf_threshold}）..."):
-                res = run_inference(saved, confidence_threshold=conf_threshold)
-                res["detect_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                st.session_state["last_single"] = res
-                st.session_state["last_single_path"] = str(saved)
-            st.success("检测完成")
-        except Exception as e:
-            st.error(f"检测失败：{e}")
-            return
+    # ========== 标签页1：本地上传 ==========
+    with tab1:
+        st.subheader("上传 EL 图像")
+        st.caption("支持 jpg、jpeg、png 格式")
+        
+        uploaded_file = st.file_uploader("选择图片文件", type=["jpg", "jpeg", "png"], key="upload_tab_uploader")
+        detect_btn = st.button("开始检测", type="primary", key="upload_detect_btn")
 
+        if detect_btn and uploaded_file is not None:
+            if not validate_image_filename(uploaded_file.name):
+                st.error("仅支持 jpg、jpeg、png 格式")
+                return
+            ts = st.session_state.get("torch_status") or {}
+            if not ts.get("any_ok"):
+                st.error("PyTorch 环境异常，无法推理。请按上方修复指南重建环境后重试。")
+                return
+            try:
+                saved = save_uploaded_file(uploaded_file)
+                with st.spinner(f"正在 PV-S3 推理（阈值={conf_threshold}）..."):
+                    res = run_inference(saved, confidence_threshold=conf_threshold)
+                    res["detect_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    res["source_type"] = "upload"
+                    st.session_state["last_single"] = res
+                    st.session_state["last_single_path"] = str(saved)
+                st.success("检测完成")
+            except Exception as e:
+                st.error(f"检测失败：{e}")
+                return
+
+    # ========== 标签页2：摄像头截图 ==========
+    with tab2:
+        st.subheader("摄像头实时预览")
+        st.caption("点击相机图标拍照，或使用底部按钮")
+        
+        # 使用 Streamlit 内置的 camera_input 组件
+        camera_image = st.camera_input("拍照", key="camera_input_main")
+        
+        if camera_image is not None:
+            # 截图成功，显示预览
+            st.success("📸 截图成功！")
+            
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                st.subheader("截图预览")
+                st.image(camera_image, use_container_width=True)
+            
+            with col2:
+                st.subheader("操作")
+                retake_btn = st.button("🔄 重新拍摄", key="camera_retake_btn")
+                detect_camera_btn = st.button("✅ 确认并开始检测", type="primary", key="camera_detect_btn")
+                
+                if retake_btn:
+                    # 清除当前截图，让用户重新拍摄
+                    st.session_state["last_camera_image"] = None
+                    if hasattr(st, "rerun"):
+                        st.rerun()
+                    else:
+                        st.experimental_rerun()
+                
+                if detect_camera_btn:
+                    ts = st.session_state.get("torch_status") or {}
+                    if not ts.get("any_ok"):
+                        st.error("PyTorch 环境异常，无法推理。请按上方修复指南重建环境后重试。")
+                        return
+                    try:
+                        # 生成带时间戳的文件名
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"camera_capture_{timestamp}.png"
+                        
+                        # 保存到 uploads 目录
+                        uploads_dir = PROJECT_ROOT / "uploads"
+                        uploads_dir.mkdir(parents=True, exist_ok=True)
+                        saved_path = uploads_dir / filename
+                        
+                        # 将截图保存到文件
+                        with open(saved_path, "wb") as f:
+                            f.write(camera_image.getvalue())
+                        
+                        with st.spinner(f"正在 PV-S3 推理（阈值={conf_threshold}）..."):
+                            res = run_inference(saved_path, confidence_threshold=conf_threshold)
+                            res["detect_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            res["source_type"] = "camera"
+                            st.session_state["last_single"] = res
+                            st.session_state["last_single_path"] = str(saved_path)
+                        st.success(f"检测完成！截图已保存为：{filename}")
+                    except Exception as e:
+                        st.error(f"检测失败：{e}")
+                        return
+        else:
+            # 摄像头未启动或用户未授权
+            st.info("👆 点击上方相机图标启动摄像头，或使用「拍照」按钮")
+            st.caption("💡 如果浏览器提示需要摄像头权限，请选择「允许」。如果无法启动摄像头，请切换到「本地上传」标签页。")
+
+    # ========== 检测结果展示（两个标签页共享） ==========
     res = st.session_state.get("last_single")
     if not res:
-        st.info("请上传图片并点击「开始检测」。")
+        st.info("请上传图片或使用摄像头截图，然后点击「开始检测」。")
         return
 
     # 5 图展示：上排3张 + 下排2张，强制等大
@@ -197,7 +370,7 @@ def page_single():
     st.markdown(f"**全局平均置信度：** {res['confidence_score']:.4f}")
     st.markdown(f"**使用置信度阈值：** {res.get('confidence_threshold', 'N/A')}")
 
-    col_a, col_b = st.columns(2)
+    col_a, col_b, col_c = st.columns(3)
     with col_a:
         if st.button("保存检测记录到数据库"):
             try:
@@ -230,7 +403,7 @@ def page_single():
             except Exception as e:
                 st.error(f"保存失败：{e}")
     with col_b:
-        if st.button("生成 Word 报告"):
+        if st.button("生成 Word 报告（规则模板）"):
             try:
                 rep = dict(res)
                 rep.setdefault("detect_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -246,9 +419,53 @@ def page_single():
             except Exception as e:
                 st.error(f"报告生成失败：{e}")
 
+    with col_c:
+        llm_cfg = st.session_state.get("llm_sidebar", {})
+        if llm_cfg.get("use_rag"):
+            st.success("📚 RAG 已启用 — 将检索知识库辅助分析", icon="📚")
+        else:
+            st.caption("💡 勾选侧边栏 RAG 开关可启用知识库增强")
+        if st.button("🤖 Agent 生成智能报告", type="secondary"):
+            if not llm_cfg.get("configured"):
+                st.error("请先在侧边栏配置 LLM API Key，或复制 .env.example 为 .env 后填写。")
+            else:
+                try:
+                    rep = dict(res)
+                    rep.setdefault("detect_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    with st.spinner("Agent 正在分析检测结果并撰写报告（约 30~90 秒）..."):
+                        out = _run_report_agent_safe(
+                            rep,
+                            api_key=llm_cfg.get("api_key"),
+                            base_url=llm_cfg.get("base_url"),
+                            model_name=llm_cfg.get("model_name"),
+                            use_rag=llm_cfg.get("use_rag", False),
+                        )
+                    if out.get("success"):
+                        path = out["report_path"]
+                        st.session_state["last_agent_report"] = out
+                        rid = st.session_state.get("last_saved_result_id")
+                        if rid:
+                            rel_rep = out.get("report_path_relative") or path
+                            insert_report_info(rid, rel_rep)
+                        st.success(f"AI Agent 报告已生成：{path}")
+                        with st.expander("查看 Agent 输出摘要"):
+                            st.write(out.get("agent_output", ""))
+                            if out.get("agent_notes"):
+                                st.caption(" | ".join(out["agent_notes"]))
+                        rag_sources = out.get("rag_sources")
+                        if rag_sources:
+                            with st.expander("📚 RAG 知识库检索来源", expanded=True):
+                                for i, src in enumerate(rag_sources, 1):
+                                    st.markdown(f"**{i}. [{src['score']:.4f}] {src['source']}**")
+                                    st.caption(src['content'][:300])
+                    else:
+                        st.error(out.get("error", "Agent 生成失败"))
+                except Exception as e:
+                    st.error(f"Agent 报告生成失败：{e}")
 
 def page_batch():
     st.header("批量图像检测")
+    _show_torch_warning_if_needed()
 
     # 置信度阈值
     conf_threshold = st.select_slider(
@@ -398,6 +615,155 @@ def page_history():
                 st.experimental_rerun()
 
 
+def page_ai_agent():
+    st.header("AI Agent 智能报告")
+    st.markdown(
+        """
+本模块使用 **LangChain Tool-Calling Agent**，在 PV-S3 结构化检测结果基础上，
+自动调用工具生成 Word 报告并撰写专业分析章节。
+
+**Agent 工具链：**
+1. `get_detection_summary` — 读取缺陷面积、类别、严重度等结构化数据  
+2. `generate_base_word_report` — 生成含原图/Mask/热图的基础报告  
+3. `append_ai_analysis` — 写入执行摘要、缺陷分析、运维建议、风险评估、结论  
+4. `get_report_file_path` — 返回报告路径  
+
+**配置方式：** 侧边栏填写 API Key，或在项目根目录创建 `.env`（参考 `.env.example`）。
+        """
+    )
+    llm_cfg = st.session_state.get("llm_sidebar", {})
+    st.info(
+        f"当前 API：`{llm_cfg.get('base_url', DEFAULT_BASE_URL)}` | "
+        f"模型：`{llm_cfg.get('model_name', DEFAULT_MODEL)}` | "
+        f"Key：{mask_api_key(llm_cfg.get('api_key', ''))}"
+    )
+    res = st.session_state.get("last_single")
+    if not res:
+        st.warning("请先在「单张图像检测」完成一次检测，再在此生成 Agent 报告。")
+        return
+    use_rag = llm_cfg.get("use_rag", False)
+    if use_rag:
+        st.success("📚 RAG 已启用 — Agent 将检索知识库辅助分析", icon="📚")
+    else:
+        st.caption("💡 勾选侧边栏 RAG 开关可启用知识库增强")
+    if st.button("使用 Agent 生成报告", type="primary"):
+        if not llm_cfg.get("configured"):
+            st.error("请先在侧边栏配置 LLM API Key。")
+            return
+        rep = dict(res)
+        rep.setdefault("detect_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        with st.spinner("Agent 运行中..."):
+            out = _run_report_agent_safe(
+                rep,
+                api_key=llm_cfg.get("api_key"),
+                base_url=llm_cfg.get("base_url"),
+                model_name=llm_cfg.get("model_name"),
+                use_rag=llm_cfg.get("use_rag", False),
+            )
+        if out.get("success"):
+            st.success(f"报告路径：{out['report_path']}")
+            st.markdown("**Agent 最终输出：**")
+            st.write(out.get("agent_output", ""))
+            if out.get("agent_notes"):
+                st.caption(" | ".join(out["agent_notes"]))
+            rag_sources = out.get("rag_sources")
+            if rag_sources:
+                with st.expander("📚 RAG 知识库检索来源", expanded=True):
+                    for i, src in enumerate(rag_sources, 1):
+                        st.markdown(f"**{i}. [{src['score']:.4f}] {src['source']}**")
+                        st.caption(src['content'][:300])
+        else:
+            st.error(out.get("error"))
+
+
+def page_rag():
+    """RAG 知识库管理页面。"""
+    st.header("📚 RAG 知识库管理")
+    st.markdown("""
+光伏缺陷检测领域知识库，为 AI Agent 提供专业参考资料。
+知识库文档位于 `data/knowledge/`，向量库位于 `data/chroma_db/`。
+    """)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("知识库状态")
+        kb_dir = Path("data/knowledge")
+        md_files = list(kb_dir.glob("*.md")) if kb_dir.exists() else []
+        pdf_files = list(kb_dir.glob("*.pdf")) if kb_dir.exists() else []
+        st.metric("知识文档数", len(md_files) + len(pdf_files))
+        if md_files or pdf_files:
+            with st.expander("查看文档列表"):
+                for f in md_files:
+                    st.caption(f"📄 {f.name}")
+                for f in pdf_files:
+                    st.caption(f"📑 {f.name}")
+
+        chroma_dir = Path("data/chroma_db")
+        chroma_exists = chroma_dir.exists() and any(chroma_dir.iterdir())
+        chroma_count = 0
+        if chroma_exists:
+            try:
+                import sqlite3
+                conn = sqlite3.connect(str(chroma_dir / "chroma.sqlite3"))
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM embeddings")
+                chroma_count = cur.fetchone()[0]
+                conn.close()
+            except Exception:
+                pass
+        chroma_real = chroma_exists and chroma_count > 0
+        status_text = f"✅ 已构建 ({chroma_count} 条)" if chroma_real else ("⚠️ 空库，需构建" if chroma_exists else "❌ 未构建")
+        st.metric("向量库状态", status_text)
+
+    with col2:
+        st.subheader("构建/重建知识库")
+        st.caption("运行知识库灌入脚本，将 Markdown 文档向量化存入 ChromaDB。")
+        llm_cfg = st.session_state.get("llm_sidebar", {})
+
+        if st.button("🔨 构建知识库", type="primary"):
+            if not llm_cfg.get("configured"):
+                st.error("请先在侧边栏配置 LLM API Key（用于生成 Embedding）。")
+            else:
+                with st.spinner("正在分块、向量化文档……"):
+                    try:
+                        import subprocess
+                        script = Path("scripts/build_knowledge_base.py")
+                        cmd = [
+                            sys.executable, str(script), "--force",
+                            "--api-key", llm_cfg.get("api_key", ""),
+                            "--base-url", llm_cfg.get("base_url", ""),
+                        ]
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                        if result.returncode == 0:
+                            st.success("知识库构建完成！")
+                            st.code(result.stdout)
+                        else:
+                            st.error(f"构建失败")
+                            st.code(result.stderr or result.stdout)
+                    except Exception as e:
+                        st.error(f"构建出错: {e}")
+
+        if st.button("🔍 检查知识库"):
+            try:
+                import subprocess
+                script = Path("scripts/build_knowledge_base.py")
+                cmd = [sys.executable, str(script), "--check"]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                st.code(result.stdout)
+            except Exception as e:
+                st.error(f"检查失败: {e}")
+
+    st.markdown("---")
+    st.subheader("使用说明")
+    st.markdown("""
+1. 在侧边栏配置 LLM API Key
+2. 点击「构建知识库」完成文档向量化
+3. 在侧边栏勾选「启用光伏领域知识检索」
+4. 运行 Agent 生成报告时，将自动检索相关知识
+    """)
+
+
 def page_docs():
     st.header("模型与技术说明")
     st.markdown(
@@ -421,10 +787,14 @@ PV-S3 面向光伏缺陷分割，结合半监督学习与语义分割骨干（�
 ### 本系统推理流程（概念）
 上传图像 → 预处理（缩放/归一化）→ 网络前向 → softmax / argmax → 后处理（阈值、连通域）→ 量化与可视化。
 
+### LangChain Agent 智能报告
+大模型**不参与**像素级缺陷分割，仅对 PV-S3 结构化输出进行自然语言分析与报告增强。
+使用 Tool-Calling Agent 调用 `generate_base_word_report`、`append_ai_analysis` 等工具。
+
 ### 技术亮点
-- 统一推理接口，便于替换为官方 PV-S3 权重  
-- Fallback 保证课设演示不中断  
-- 业务侧量化指标与报告自动生成  
+- 真实 PV-S3 五类语义分割 + 置信度阈值过滤  
+- LangChain Agent 工具链自动生成 Word 智能分析章节  
+- 业务侧量化指标与规则/AI 双模式报告  
         """
     )
 
@@ -457,13 +827,18 @@ def main():
         "单张图像检测": page_single,
         "批量图像检测": page_batch,
         "历史检测记录": page_history,
+        "AI 智能报告": page_ai_agent,
         "模型与技术说明": page_docs,
         "模型指标评价": page_metrics,
+        "RAG 知识库": page_rag,
     }
     st.sidebar.title("导航")
-    choice = st.sidebar.radio("选择页面", list(pages.keys()))
+    page_names = list(pages.keys())
+    choice = st.sidebar.radio("选择页面", page_names, key="main_nav_page")
+    st.session_state["llm_sidebar"] = render_llm_sidebar()
     pages[choice]()
 
 
 if __name__ == "__main__":
     main()
+

@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from src.processing.defect_analysis import analyze_binary_mask
+from src.processing.image_utils import imread_bgr, imwrite_bgr
 from src.utils.config import (
     COLORIZED_DIR,
     DEFAULT_CONFIDENCE_THRESHOLD,
@@ -244,14 +245,19 @@ def _colorize_mask(class_map: np.ndarray, palette: list[int]) -> np.ndarray:
 
 
 def _save_heatmap(conf_map: np.ndarray, save_path: Path) -> None:
-    """保存置信度热图（matplotlib）。"""
+    """保存置信度热图（matplotlib），兼容 Unicode 路径。"""
+    from io import BytesIO
+
     plt.figure(figsize=(10, 8))
     plt.imshow(conf_map, cmap="jet", vmin=0.0, vmax=1.0)
     plt.colorbar(label="Confidence")
     plt.axis("off")
     plt.tight_layout(pad=0)
-    plt.savefig(str(save_path), dpi=150, bbox_inches="tight", pad_inches=0)
+    buf = BytesIO()
+    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight", pad_inches=0)
     plt.close()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    save_path.write_bytes(buf.getvalue())
 
 
 def _save_visuals(
@@ -273,17 +279,16 @@ def _save_visuals(
 
     # 1) 原图
     orig_path = MASK_DIR / f"{stem}_img.png"
-    cv2.imwrite(str(orig_path), image_bgr)
+    imwrite_bgr(orig_path, image_bgr)
 
     # 2) 二值 mask（兼容下游）
     mask_path = MASK_DIR / f"{stem}_mask.png"
-    cv2.imwrite(str(mask_path), binary_mask)
+    imwrite_bgr(mask_path, binary_mask)
 
     # 3) 分类彩色预测图
     colored = _colorize_mask(class_map, PV_S3_PALETTE)
     colored_path = COLORIZED_DIR / f"{stem}_pred.png"
-    cv2.cvtColor(colored, cv2.COLOR_RGB2BGR)  # cv2 写 BGR
-    cv2.imwrite(str(colored_path), cv2.cvtColor(colored, cv2.COLOR_RGB2BGR))
+    imwrite_bgr(colored_path, cv2.cvtColor(colored, cv2.COLOR_RGB2BGR))
 
     # 4) 置信度热图
     heatmap_path = HEATMAP_DIR / f"{stem}_conf.png"
@@ -295,7 +300,7 @@ def _save_visuals(
     overlay_blend = cv2.addWeighted(overlay_bgr, 0.6, colored_bgr, 0.4, 0)
     overlay_blend = overlay_blend.clip(0, 255).astype(np.uint8)
     overlay_path = OVERLAY_DIR / f"{stem}_overlay.png"
-    cv2.imwrite(str(overlay_path), overlay_blend)
+    imwrite_bgr(overlay_path, overlay_blend)
 
     return {
         "original_path": get_relative_to_project(orig_path),
@@ -316,20 +321,24 @@ def run_inference(
     confidence_threshold: float | None = None,
 ) -> dict[str, Any]:
     """
-    端到端推理。
-
-    Parameters
-    ----------
-    image_path : str | Path
-        输入 EL 图像路径。
-    confidence_threshold : float | None
-        缺陷判定置信度阈值 [0.85, 0.999]。None 时使用 DEFAULT_CONFIDENCE_THRESHOLD。
-
-    Returns
-    -------
-    result : dict
-        包含所有路径、统计、类别信息。
+    端到端推理。优先进程内执行；若 PyTorch DLL 冲突则尝试子进程。
     """
+    try:
+        return _run_inference_in_process(image_path, confidence_threshold)
+    except OSError as exc:
+        msg = str(exc)
+        if "1114" in msg or "c10.dll" in msg.lower() or "dll" in msg.lower():
+            from src.model.inference_runner import run_inference_via_subprocess
+
+            return run_inference_via_subprocess(image_path, confidence_threshold)
+        raise
+
+
+def _run_inference_in_process(
+    image_path: str | Path,
+    confidence_threshold: float | None = None,
+) -> dict[str, Any]:
+    """原进程内推理逻辑。"""
     if not _USE_REAL_MODEL:
         load_model()
 
@@ -339,7 +348,7 @@ def run_inference(
     if not path.is_file():
         raise FileNotFoundError(f"图像不存在: {path}")
 
-    image_bgr = cv2.imread(str(path))
+    image_bgr = imread_bgr(path)
     if image_bgr is None:
         raise ValueError(f"无法读取图像: {path}")
 
