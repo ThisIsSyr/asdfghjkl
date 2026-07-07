@@ -190,15 +190,29 @@ def page_single():
         f"推理模式：`{'PV-S3' if status['using_real_model'] else '未加载'}`"
     )
 
-    # 置信度阈值滑块
-    st.markdown("**⚙️ 置信度阈值调节**")
-    st.caption("只统计模型置信度 ≥ 阈值的像素为缺陷。阈值越高，检测越严格。")
-    conf_threshold = st.select_slider(
-        "置信度阈值",
-        options=[0.85, 0.88, 0.90, 0.92, 0.95, 0.97, 0.98, 0.99, 0.995, 0.999],
-        value=0.90,
+    # 检测严格度（三级）
+    st.markdown("**⚙️ 检测严格度**")
+    st.caption("严格度越高，误检越少，但可能漏检微弱缺陷。")
+    strictness = st.select_slider(
+        "检测严格度",
+        options=["宽松", "中等", "严格"],
+        value="中等",
     )
-    st.caption(f"当前阈值：**{conf_threshold}**")
+    _LEVEL_MAP = {"宽松": 3, "中等": 4, "严格": 5}
+    T_val = _LEVEL_MAP[strictness]
+
+    # 高级参数（折叠）
+    with st.expander("⚙️ 高级参数"):
+        col_d, col_b, col_e = st.columns(3)
+        with col_d:
+            D_val = st.slider("灰度偏差阈值 (D)", 5, 25, 15,
+                              help="越低→对灰度偏差越敏感，检出越多异常区域")
+        with col_b:
+            blur_val = st.slider("背景模糊半径", 5, 25, 15,
+                                 help="越大→背景估计越平滑，只检出大块异常")
+        with col_e:
+            elong_val = st.slider("栅线形状尺寸阈值", 5, 40, 15,
+                                  help="越大→更宽松地保留疑似栅线的区域")
 
     # 标签页：本地上传 / 摄像头截图
     tab1, tab2 = st.tabs(["📁 本地上传", "📷 摄像头截图"])
@@ -221,8 +235,8 @@ def page_single():
                 return
             try:
                 saved = save_uploaded_file(uploaded_file)
-                with st.spinner(f"正在 PV-S3 推理（阈值={conf_threshold}）..."):
-                    res = run_inference(saved, confidence_threshold=conf_threshold)
+                with st.spinner(f"正在 PV-S3 推理（严格度: {strictness}, T={T_val}）..."):
+                    res = run_inference(saved, T=T_val, D=D_val, blur_radius=blur_val, elongation_th=elong_val, tta=True, scales="0.75,1.0,1.25")
                     res["detect_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     res["source_type"] = "upload"
                     st.session_state["last_single"] = res
@@ -281,8 +295,8 @@ def page_single():
                         with open(saved_path, "wb") as f:
                             f.write(camera_image.getvalue())
                         
-                        with st.spinner(f"正在 PV-S3 推理（阈值={conf_threshold}）..."):
-                            res = run_inference(saved_path, confidence_threshold=conf_threshold)
+                        with st.spinner(f"正在 PV-S3 推理（严格度: {strictness}, T={T_val}）..."):
+                            res = run_inference(saved_path, T=T_val, D=D_val, blur_radius=blur_val, elongation_th=elong_val, tta=True, scales="0.75,1.0,1.25")
                             res["detect_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             res["source_type"] = "camera"
                             st.session_state["last_single"] = res
@@ -318,10 +332,11 @@ def page_single():
     orig = resolve_project_path(res["original_path"], PROJECT_ROOT)
     colorized = resolve_project_path(res.get("colorized_mask_path", ""), PROJECT_ROOT)
     heatmap = resolve_project_path(res.get("heatmap_path", ""), PROJECT_ROOT)
+    logits_diff = resolve_project_path(res.get("logits_diff_path", ""), PROJECT_ROOT)
     over = resolve_project_path(res["overlay_path"], PROJECT_ROOT)
     mask = resolve_project_path(res["mask_path"], PROJECT_ROOT)
 
-    # 上排：原图 | 分类预测图 | 置信度热图
+    # 3×2 展示：原图 | 分类预测图 | 置信度热图 | Logits差值 | 叠加图 | 二值Mask
     r1c1, r1c2, r1c3 = st.columns(3)
     with r1c1:
         st.subheader("原图")
@@ -336,13 +351,16 @@ def page_single():
         if heatmap and heatmap.is_file():
             st.image(Image.open(heatmap), use_container_width=True)
 
-    # 下排：叠加图 | 二值Mask（用 offset columns 居中）
-    _, r2c1, r2c2, _ = st.columns([1, 3, 3, 1])
+    r2c1, r2c2, r2c3 = st.columns(3)
     with r2c1:
+        st.subheader("Logits 差值热图")
+        if logits_diff and logits_diff.is_file():
+            st.image(Image.open(logits_diff), use_container_width=True)
+    with r2c2:
         st.subheader("叠加图")
         if over.is_file():
             st.image(Image.open(over), use_container_width=True)
-    with r2c2:
+    with r2c3:
         st.subheader("二值 Mask")
         if mask.is_file():
             st.image(Image.open(mask), use_container_width=True)
@@ -368,7 +386,7 @@ def page_single():
     st.markdown(f"**缺陷类别：** {res['defect_categories']}")
     st.markdown(f"**维护建议：** {res['suggestion']}")
     st.markdown(f"**全局平均置信度：** {res['confidence_score']:.4f}")
-    st.markdown(f"**使用置信度阈值：** {res.get('confidence_threshold', 'N/A')}")
+    st.markdown(f"**检测严格度：** {strictness} (T={res.get('confidence_threshold', 'N/A')})")
 
     col_a, col_b, col_c = st.columns(3)
     with col_a:
@@ -467,13 +485,26 @@ def page_batch():
     st.header("批量图像检测")
     _show_torch_warning_if_needed()
 
-    # 置信度阈值
-    conf_threshold = st.select_slider(
-        "置信度阈值",
-        options=[0.85, 0.88, 0.90, 0.92, 0.95, 0.97, 0.98, 0.99, 0.995, 0.999],
-        value=0.90,
+    # 检测严格度（三级）
+    st.markdown("**⚙️ 检测严格度**")
+    st.caption("严格度越高，误检越少，但可能漏检微弱缺陷。")
+    batch_strictness = st.select_slider(
+        "检测严格度",
+        options=["宽松", "中等", "严格"],
+        value="中等",
+        key="batch_strictness",
     )
-    st.caption(f"当前阈值：**{conf_threshold}**")
+    _BATCH_LEVEL_MAP = {"宽松": 4, "中等": 6, "严格": 8}
+    batch_T = _BATCH_LEVEL_MAP[batch_strictness]
+
+    with st.expander("⚙️ 高级参数"):
+        bcol_d, bcol_b, bcol_e = st.columns(3)
+        with bcol_d:
+            batch_D = st.slider("灰度偏差阈值 (D)", 5, 30, 15, key="batch_D")
+        with bcol_b:
+            batch_blur = st.slider("背景模糊半径", 5, 31, 15, step=2, key="batch_blur")
+        with bcol_e:
+            batch_elong = st.slider("栅线形状尺寸阈值", 10, 50, 25, key="batch_elong")
 
     files = st.file_uploader(
         "一次选择多张图片",
@@ -488,7 +519,7 @@ def page_batch():
                 continue
             try:
                 saved = save_uploaded_file(f, subfolder="batch")
-                res = run_inference(saved, confidence_threshold=conf_threshold)
+                res = run_inference(saved, T=batch_T, D=batch_D, blur_radius=batch_blur, elongation_th=batch_elong, tta=True, scales="0.75,1.0,1.25")
                 res["file_name"] = f.name
                 rows.append(res)
             except Exception as e:
@@ -516,7 +547,7 @@ def page_batch():
                 "最大缺陷面积": r["max_defect_area"],
                 "严重程度": r["severity_level"],
                 "模式": r.get("mode", ""),
-                "阈值": r.get("confidence_threshold", ""),
+                "严格度(T)": r.get("confidence_threshold", ""),
             }
         )
     df = pd.DataFrame(df_data)

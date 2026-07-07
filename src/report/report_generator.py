@@ -136,11 +136,10 @@ def generate_report(result_dict: dict[str, Any]) -> str:
     else:
         doc.add_paragraph("（无逐类置信度数据）")
 
-    threshold = result_dict.get("confidence_threshold", 0.90)
+    t_value = result_dict.get("confidence_threshold", 6)
     doc.add_paragraph(
-        f"本次检测使用置信度阈值 {threshold}。"
-        f"仅当模型对某像素的最高类别概率 ≥ {threshold} 时才将其计入缺陷区域。"
-        f"阈值越高，误检率越低，但可能漏掉置信度较低的微弱缺陷。"
+        f"本次检测使用的置信度等级为 T={t_value}（数值越大检测越严格）。"
+        f"阈值越高，误检越少，但可能漏掉微弱缺陷。"
     )
 
     # ---- 运维建议 ----
@@ -153,7 +152,7 @@ def generate_report(result_dict: dict[str, Any]) -> str:
     ratio = float(result_dict.get("defect_area_ratio", 0))
     defect_categories = result_dict.get("defect_categories", "")
     conclusion = (
-        f"综合 PV-S3 语义分割结果（置信度阈值 {threshold}），"
+        f"综合 PV-S3 语义分割结果（置信度等级 T={t_value}），"
         f"检测到缺陷类别：{defect_categories}，"
         f"缺陷面积占比为 {ratio * 100:.2f}%，"
         f"严重程度判定为「{sev}」。请结合现场工况参考运维建议执行后续动作。"

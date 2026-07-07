@@ -15,6 +15,7 @@ MASK_DIR = OUTPUT_DIR / "masks"
 OVERLAY_DIR = OUTPUT_DIR / "overlays"
 HEATMAP_DIR = OUTPUT_DIR / "heatmaps"
 COLORIZED_DIR = OUTPUT_DIR / "colorized"
+LOGITS_DIFF_DIR = OUTPUT_DIR / "logits_diff"
 CSV_DIR = OUTPUT_DIR / "csv"
 REPORTS_DIR = PROJECT_ROOT / "reports"
 DATA_DIR = PROJECT_ROOT / "data"
@@ -34,6 +35,14 @@ MODEL_VERSION = "2614-e30"
 
 # 默认置信度阈值（缺陷判定：argmax ≠ 0 且 max_prob ≥ 此值）
 DEFAULT_CONFIDENCE_THRESHOLD = 0.90
+
+# 三阶段融合推理参数（默认值）
+DEFAULT_T = 6                # Logits diff 主阈值（中等严格度）
+DEFAULT_T_HIGH = 8           # 背景区安全兜底阈值（自动 = T + 2）
+DEFAULT_D = 15               # 局部灰度偏差阈值
+DEFAULT_BLUR_RADIUS = 15     # 高斯模糊半径（越大越平滑）
+DEFAULT_ELONGATION_TH = 25   # 栅线长宽比阈值（越大越宽松）
+DEFAULT_MIN_AREA_GRID = 150  # 栅线最小面积（像素）
 
 # fallback 平均置信度
 FALLBACK_MEAN_CONFIDENCE = 0.72
@@ -55,6 +64,7 @@ def ensure_directories() -> None:
         OVERLAY_DIR,
         HEATMAP_DIR,
         COLORIZED_DIR,
+        LOGITS_DIFF_DIR,
         CSV_DIR,
         REPORTS_DIR,
         DATA_DIR,
